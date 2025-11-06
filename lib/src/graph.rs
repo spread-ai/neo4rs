@@ -212,7 +212,15 @@ impl Graph {
         }
         #[cfg(not(feature = "unstable-bolt-protocol-impl-v2"))]
         {
-            Txn::new(db, self.config.fetch_size, connection, operation, imp_user).await
+            Txn::new(
+                db,
+                self.config.fetch_size,
+                self.config.max_result_bytes,
+                connection,
+                operation,
+                imp_user,
+            )
+            .await
         }
     }
 
@@ -233,6 +241,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
+            self.config.max_result_bytes,
             q.into(),
         )
         .await
@@ -272,6 +281,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
+            self.config.max_result_bytes,
             q.into(),
         )
         .await
@@ -284,6 +294,7 @@ impl Graph {
         imp_user: Option<ImpersonateUser>,
         bookmarks: &[String],
         fetch_size: Option<usize>,
+        max_result_bytes: Option<usize>,
         query: Query,
     ) -> Result<RunResult> {
         let query = query.into_retryable(
@@ -292,6 +303,7 @@ impl Graph {
             Operation::Write,
             &self.pool,
             fetch_size.or(Some(self.config.fetch_size)),
+            max_result_bytes.or(self.config.max_result_bytes),
             bookmarks,
         );
 
@@ -322,6 +334,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
+            self.config.max_result_bytes.clone(),
             q.into(),
         )
         .await
@@ -340,6 +353,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
+            self.config.max_result_bytes,
             q.into(),
         )
         .await
@@ -386,6 +400,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
+            self.config.max_result_bytes,
             q.into(),
         )
         .await
@@ -399,6 +414,7 @@ impl Graph {
         imp_user: Option<ImpersonateUser>,
         bookmarks: &[String],
         fetch_size: Option<usize>,
+        max_result_bytes: Option<usize>,
         query: Query,
     ) -> Result<DetachedRowStream> {
         let query = query.into_retryable(
@@ -407,6 +423,7 @@ impl Graph {
             operation,
             &self.pool,
             fetch_size.or(Some(self.config.fetch_size)),
+            max_result_bytes,
             bookmarks,
         );
 

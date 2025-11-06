@@ -37,6 +37,7 @@ pub struct RowStream {
     available_after: i64,
     state: State,
     fetch_size: usize,
+    max_result_bytes: Option<usize>,
     buffer: VecDeque<Row>,
     /// Cumulative number of bytes read from the server for this query.
     total_bytes_read: usize,
@@ -48,6 +49,7 @@ impl RowStream {
         #[cfg(feature = "unstable-bolt-protocol-impl-v2")] available_after: i64,
         fields: BoltList,
         fetch_size: usize,
+        max_result_bytes: Option<usize>,
     ) -> Self {
         RowStream {
             qid,
@@ -55,6 +57,7 @@ impl RowStream {
             available_after,
             fields,
             fetch_size,
+            max_result_bytes,
             state: State::Ready,
             buffer: VecDeque::with_capacity(fetch_size),
             total_bytes_read: 0,
@@ -132,15 +135,16 @@ impl RowStream {
                     let connection = handle.connection();
                     connection.send(pull).await?;
 
-                    let max_size = 5 * 1024 * 1024; // 5 MB
                     self.state = loop {
                         let res = connection.recv().await;
                         self.total_bytes_read = connection.total_bytes_read();
-                        if self.total_bytes_read > max_size {
-                            return Err(Error::MemoryLimitExceeded(format!(
-                                "Bolt message of {} bytes exceeds the limit {} bytes",
-                                self.total_bytes_read, max_size
-                            )));
+                        if let Some(max_result_bytes) = self.max_result_bytes {
+                            if self.total_bytes_read > max_result_bytes {
+                                return Err(Error::MemoryLimitExceeded(format!(
+                                    "Bolt message bytes exceeded the configured limit ({} > {}).",
+                                    self.total_bytes_read, max_result_bytes
+                                )));
+                            }
                         }
 
                         match res {

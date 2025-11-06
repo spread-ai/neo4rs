@@ -20,6 +20,7 @@ use crate::{
 pub struct Txn {
     db: Option<Database>,
     fetch_size: usize,
+    max_result_bytes: Option<usize>,
     connection: ManagedConnection,
     operation: Operation,
     imp_user: Option<ImpersonateUser>,
@@ -32,6 +33,7 @@ impl Txn {
     pub(crate) async fn new(
         db: Option<Database>,
         fetch_size: usize,
+        max_result_bytes: Option<usize>,
         mut connection: ManagedConnection,
         operation: Operation,
         imp_user: Option<ImpersonateUser>,
@@ -41,6 +43,7 @@ impl Txn {
             BoltResponse::Success(_) => Ok(Txn {
                 db,
                 fetch_size,
+                max_result_bytes,
                 connection,
                 operation,
                 imp_user,
@@ -143,7 +146,7 @@ impl Txn {
             },
         );
         query
-            .execute_mut(self.fetch_size, &mut self.connection)
+            .execute_mut(self.fetch_size, self.max_result_bytes, &mut self.connection)
             .await
     }
 
