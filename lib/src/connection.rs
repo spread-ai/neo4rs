@@ -207,7 +207,7 @@ impl Connection {
     #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
     #[allow(unused)]
     pub(crate) async fn recv_as<T: MessageResponse>(&mut self) -> Result<T> {
-        let (bytes, _total_bytes) = self.recv_bytes().await?;
+        let bytes = self.recv_bytes().await?;
         Ok(T::parse(bytes)?)
     }
 
@@ -226,7 +226,6 @@ impl Connection {
     async fn recv_bytes(&mut self) -> Result<Bytes> {
         let mut bytes = BytesMut::new();
         let mut chunk_size = 0;
-
         while chunk_size == 0 {
             chunk_size = self.read_chunk_size().await?;
             self.total_bytes_read += chunk_size;
