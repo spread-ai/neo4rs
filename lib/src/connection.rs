@@ -49,6 +49,7 @@ pub struct Connection {
     #[allow(unused)]
     #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
     hints: Option<ConnectionsHints>,
+    total_bytes_read: usize,
 }
 
 impl Connection {
@@ -100,6 +101,7 @@ impl Connection {
             stream: BufStream::new(stream.into()),
             #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
             hints: None,
+            total_bytes_read: 0,
         }
     }
 
@@ -172,8 +174,7 @@ impl Connection {
 
     pub async fn send_recv(&mut self, message: BoltRequest) -> Result<BoltResponse> {
         self.send(message).await?;
-        let (response, _total_bytes) = self.recv().await?;
-        Ok(response)
+        self.recv().await
     }
 
     #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
@@ -198,9 +199,9 @@ impl Connection {
         self.send_bytes(bytes).await
     }
 
-    pub async fn recv(&mut self) -> Result<(BoltResponse, usize)> {
-        let (bytes, total_bytes) = self.recv_bytes().await?;
-        Ok((BoltResponse::parse(self.version, bytes)?, total_bytes))
+    pub async fn recv(&mut self) -> Result<BoltResponse> {
+        let bytes = self.recv_bytes().await?;
+        BoltResponse::parse(self.version, bytes)
     }
 
     #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
@@ -222,25 +223,24 @@ impl Connection {
         Ok(())
     }
 
-    async fn recv_bytes(&mut self) -> Result<(Bytes, usize)> {
+    async fn recv_bytes(&mut self) -> Result<Bytes> {
         let mut bytes = BytesMut::new();
         let mut chunk_size = 0;
-        let mut total_bytes = 0;
 
         while chunk_size == 0 {
             chunk_size = self.read_chunk_size().await?;
-            total_bytes += chunk_size;
+            self.total_bytes_read += chunk_size;
         }
 
         while chunk_size > 0 {
             self.read_chunk(chunk_size, &mut bytes).await?;
             chunk_size = self.read_chunk_size().await?;
-            total_bytes += chunk_size;
+            self.total_bytes_read += chunk_size;
         }
 
         let bytes = bytes.freeze();
         Self::dbg("recv", &bytes);
-        Ok((bytes, total_bytes))
+        Ok(bytes)
     }
 
     async fn read_chunk_size(&mut self) -> Result<usize> {
@@ -268,6 +268,10 @@ impl Connection {
     #[cfg(all(feature = "unstable-serde-packstream-format", test, debug_assertions))]
     fn dbg(tag: &str, bytes: &Bytes) {
         eprintln!("[{}] {:?}", tag, crate::packstream::Dbg(bytes));
+    }
+
+    pub fn total_bytes_read(&self) -> usize {
+        self.total_bytes_read
     }
 }
 

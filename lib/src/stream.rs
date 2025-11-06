@@ -132,22 +132,30 @@ impl RowStream {
                     let connection = handle.connection();
                     connection.send(pull).await?;
 
+                    let max_size = 5 * 1024 * 1024; // 5 MB
                     self.state = loop {
-                        match connection.recv().await {
-                            Ok((BoltResponse::Success(s), total_bytes)) => {
-                                self.total_bytes_read += total_bytes;
+                        let res = connection.recv().await;
+                        self.total_bytes_read = connection.total_bytes_read();
+                        if self.total_bytes_read > max_size {
+                            return Err(Error::MemoryLimitExceeded(format!(
+                                "Bolt message of {} bytes exceeds the limit {} bytes",
+                                self.total_bytes_read, max_size
+                            )));
+                        }
+
+                        match res {
+                            Ok(BoltResponse::Success(s)) => {
                                 break if s.get("has_more").unwrap_or(false) {
                                     State::Ready
                                 } else {
                                     State::Complete(())
                                 };
                             }
-                            Ok((BoltResponse::Record(record), total_bytes)) => {
+                            Ok(BoltResponse::Record(record)) => {
                                 let row = Row::new(self.fields.clone(), record.data);
-                                self.total_bytes_read += total_bytes;
                                 self.buffer.push_back(row);
                             }
-                            Ok((msg, _total_bytes)) => return Err(msg.into_error("PULL")),
+                            Ok(msg) => return Err(msg.into_error("PULL")),
                             Err(e) => return Err(e),
                         }
                     };
