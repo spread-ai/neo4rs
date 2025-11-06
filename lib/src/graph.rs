@@ -343,7 +343,7 @@ impl Graph {
     pub async fn execute_with_limit(
         &self,
         q: impl Into<Query>,
-        max_result_bytes: usize,
+        max_result_bytes: Option<usize>,
     ) -> Result<DetachedRowStream> {
         self.impl_execute_on(
             Operation::Write,
@@ -351,7 +351,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
-            Some(max_result_bytes),
+            max_result_bytes,
             q.into(),
         )
         .await
