@@ -113,7 +113,7 @@ pub enum Error {
     ServerUnavailableError(String),
 
     #[error("{0}")]
-    MemoryLimitExceeded(String),
+    ExceededResultLimit(String),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

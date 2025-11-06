@@ -215,7 +215,7 @@ impl Graph {
             Txn::new(
                 db,
                 self.config.fetch_size,
-                self.config.max_result_bytes,
+                None,
                 connection,
                 operation,
                 imp_user,
@@ -241,7 +241,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
-            self.config.max_result_bytes,
+            None,
             q.into(),
         )
         .await
@@ -281,7 +281,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
-            self.config.max_result_bytes,
+            None,
             q.into(),
         )
         .await
@@ -303,7 +303,7 @@ impl Graph {
             Operation::Write,
             &self.pool,
             fetch_size.or(Some(self.config.fetch_size)),
-            max_result_bytes.or(self.config.max_result_bytes),
+            max_result_bytes.or(None),
             bookmarks,
         );
 
@@ -334,7 +334,24 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
-            self.config.max_result_bytes.clone(),
+            None,
+            q.into(),
+        )
+        .await
+    }
+
+    pub async fn execute_with_limit(
+        &self,
+        q: impl Into<Query>,
+        max_result_bytes: usize,
+    ) -> Result<DetachedRowStream> {
+        self.impl_execute_on(
+            Operation::Write,
+            self.config.db.clone(),
+            self.config.imp_user.clone(),
+            &[],
+            Some(self.config.fetch_size),
+            Some(max_result_bytes),
             q.into(),
         )
         .await
@@ -353,7 +370,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
-            self.config.max_result_bytes,
+            None,
             q.into(),
         )
         .await
@@ -400,7 +417,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
-            self.config.max_result_bytes,
+            None,
             q.into(),
         )
         .await

@@ -118,7 +118,6 @@ pub struct LiveConfig {
     pub(crate) db: Option<Database>,
     pub(crate) fetch_size: usize,
     pub(crate) imp_user: Option<ImpersonateUser>,
-    pub(crate) max_result_bytes: Option<usize>,
 }
 
 /// The configuration used to connect to the database, see [`crate::Graph::connect`].
@@ -132,7 +131,6 @@ pub struct Config {
     pub(crate) fetch_size: usize,
     pub(crate) imp_user: Option<ImpersonateUser>,
     pub(crate) tls_config: ConnectionTLSConfig,
-    pub(crate) max_result_bytes: Option<usize>,
 }
 
 impl Config {
@@ -141,7 +139,6 @@ impl Config {
             db: self.db,
             fetch_size: self.fetch_size,
             imp_user: self.imp_user,
-            max_result_bytes: self.max_result_bytes,
         }
     }
 }
@@ -156,7 +153,6 @@ pub struct ConfigBuilder {
     max_connections: usize,
     imp_user: Option<ImpersonateUser>,
     tls_config: ConnectionTLSConfig,
-    max_result_bytes: Option<usize>,
 }
 
 impl ConfigBuilder {
@@ -244,11 +240,6 @@ impl ConfigBuilder {
         self
     }
 
-    pub fn max_result_bytes(mut self, max_result_bytes: usize) -> Self {
-        self.max_result_bytes = Some(max_result_bytes);
-        self
-    }
-
     pub fn build(self) -> Result<Config> {
         if let (Some(uri), Some(user), Some(password)) = (self.uri, self.user, self.password) {
             Ok(Config {
@@ -260,7 +251,6 @@ impl ConfigBuilder {
                 db: self.db,
                 imp_user: self.imp_user,
                 tls_config: self.tls_config,
-                max_result_bytes: self.max_result_bytes,
             })
         } else {
             Err(Error::InvalidConfig)
@@ -279,7 +269,6 @@ impl Default for ConfigBuilder {
             imp_user: None,
             fetch_size: DEFAULT_FETCH_SIZE,
             tls_config: ConnectionTLSConfig::None,
-            max_result_bytes: None,
         }
     }
 }
