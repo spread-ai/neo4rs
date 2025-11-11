@@ -303,7 +303,7 @@ impl Graph {
             Operation::Write,
             &self.pool,
             fetch_size.or(Some(self.config.fetch_size)),
-            max_result_bytes.or(None),
+            max_result_bytes,
             bookmarks,
         );
 
