@@ -233,7 +233,7 @@ impl Connection {
 
         while chunk_size > 0 {
             self.read_chunk(chunk_size, &mut bytes).await?;
-            total_bytes_read += chunk_size;
+            total_bytes_read += chunk_size + 2;
             chunk_size = self.read_chunk_size().await?;
         }
 
