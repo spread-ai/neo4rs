@@ -229,13 +229,12 @@ impl Connection {
         let mut chunk_size = 0;
         while chunk_size == 0 {
             chunk_size = self.read_chunk_size().await?;
-            total_bytes_read += chunk_size;
         }
 
         while chunk_size > 0 {
             self.read_chunk(chunk_size, &mut bytes).await?;
-            chunk_size = self.read_chunk_size().await?;
             total_bytes_read += chunk_size;
+            chunk_size = self.read_chunk_size().await?;
         }
 
         let bytes = bytes.freeze();
