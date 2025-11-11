@@ -137,29 +137,24 @@ impl RowStream {
 
                     self.state = loop {
                         let res = connection.recv().await;
-                        self.total_bytes_read = connection.total_bytes_read();
-                        if let Some(max_result_bytes) = self.max_result_bytes {
-                            if self.total_bytes_read > max_result_bytes {
-                                return Err(Error::ExceededResultLimit(format!(
-                                    "Bolt message bytes exceeded the configured limit ({} > {}).",
-                                    self.total_bytes_read, max_result_bytes
-                                )));
-                            }
-                        }
 
                         match res {
-                            Ok(BoltResponse::Success(s)) => {
+                            Ok((BoltResponse::Success(s), total_bytes_read)) => {
+                                self.add_bytes_and_check_limit(total_bytes_read)?;
+
                                 break if s.get("has_more").unwrap_or(false) {
                                     State::Ready
                                 } else {
                                     State::Complete(())
                                 };
                             }
-                            Ok(BoltResponse::Record(record)) => {
+                            Ok((BoltResponse::Record(record), total_bytes_read)) => {
+                                self.add_bytes_and_check_limit(total_bytes_read)?;
+
                                 let row = Row::new(self.fields.clone(), record.data);
                                 self.buffer.push_back(row);
                             }
-                            Ok(msg) => return Err(msg.into_error("PULL")),
+                            Ok((msg, _total_bytes_read)) => return Err(msg.into_error("PULL")),
                             Err(e) => return Err(e),
                         }
                     };
@@ -168,6 +163,21 @@ impl RowStream {
                 };
             }
         }
+    }
+
+    /// Adds to the total bytes read and enforces the configured result size limit.
+    fn add_bytes_and_check_limit(&mut self, bytes_read: usize) -> Result<(), Error> {
+        self.total_bytes_read += bytes_read;
+
+        if let Some(max_result_bytes) = self.max_result_bytes {
+            if self.total_bytes_read > max_result_bytes {
+                return Err(Error::ExceededResultLimit(format!(
+                    "Bolt message bytes exceeded the configured limit ({} > {}).",
+                    self.total_bytes_read, max_result_bytes
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Return the [`RowStream::next`] item,
