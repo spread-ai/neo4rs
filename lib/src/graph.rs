@@ -340,6 +340,12 @@ impl Graph {
         .await
     }
 
+    /// Executes a Cypher query on the configured database and returns a [`DetachedRowStream`],
+    /// limiting the maximum size of results returned (in bytes).
+    ///
+    /// This method executes the given query and streams results up to the specified `max_result_bytes`.
+    /// If the total size of the result rows reaches or exceeds this limit, reading further results will stop.
+    /// The returned [`DetachedRowStream`] contains only as many rows as fit within the limit.
     pub async fn execute_with_limit(
         &self,
         q: impl Into<Query>,
