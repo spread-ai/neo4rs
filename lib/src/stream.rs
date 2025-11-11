@@ -79,6 +79,11 @@ impl DetachedRowStream {
     pub(crate) fn new(stream: RowStream, connection: ManagedConnection) -> Self {
         DetachedRowStream { stream, connection }
     }
+    /// Returns the cumulative number of bytes read from the server for this query.
+    ///
+    /// This value counts all bytes received from the server for the query, including Bolt protocol
+    /// message bytes and headers. It can be useful for monitoring network usage, debugging, or
+    /// optimizing queries that transfer large amounts of data.
     pub fn total_bytes_read(&self) -> usize {
         self.stream.total_bytes_read
     }
