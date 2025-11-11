@@ -170,9 +170,9 @@ impl RowStream {
         self.total_bytes_read += bytes_read;
 
         if let Some(max_result_bytes) = self.max_result_bytes {
-            if self.total_bytes_read > max_result_bytes {
+            if self.total_bytes_read >= max_result_bytes {
                 return Err(Error::ExceededResultLimit(format!(
-                    "Bolt message bytes exceeded the configured limit ({} > {}).",
+                    "Bolt message bytes exceeded the configured limit ({} >= {}).",
                     self.total_bytes_read, max_result_bytes
                 )));
             }
