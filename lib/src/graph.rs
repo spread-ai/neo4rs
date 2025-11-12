@@ -212,7 +212,15 @@ impl Graph {
         }
         #[cfg(not(feature = "unstable-bolt-protocol-impl-v2"))]
         {
-            Txn::new(db, self.config.fetch_size, connection, operation, imp_user).await
+            Txn::new(
+                db,
+                self.config.fetch_size,
+                None,
+                connection,
+                operation,
+                imp_user,
+            )
+            .await
         }
     }
 
@@ -233,6 +241,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
+            None,
             q.into(),
         )
         .await
@@ -272,6 +281,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
+            None,
             q.into(),
         )
         .await
@@ -284,6 +294,7 @@ impl Graph {
         imp_user: Option<ImpersonateUser>,
         bookmarks: &[String],
         fetch_size: Option<usize>,
+        max_result_bytes: Option<usize>,
         query: Query,
     ) -> Result<RunResult> {
         let query = query.into_retryable(
@@ -292,6 +303,7 @@ impl Graph {
             Operation::Write,
             &self.pool,
             fetch_size.or(Some(self.config.fetch_size)),
+            max_result_bytes,
             bookmarks,
         );
 
@@ -322,6 +334,30 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
+            None,
+            q.into(),
+        )
+        .await
+    }
+
+    /// Executes a Cypher query on the configured database and returns a [`DetachedRowStream`],
+    /// limiting the maximum size of results returned (in bytes).
+    ///
+    /// This method executes the given query and streams results up to the specified `max_result_bytes`.
+    /// If the total size of the result rows reaches or exceeds this limit, reading further results will stop.
+    /// The returned [`DetachedRowStream`] contains only as many rows as fit within the limit.
+    pub async fn execute_with_limit(
+        &self,
+        q: impl Into<Query>,
+        max_result_bytes: Option<usize>,
+    ) -> Result<DetachedRowStream> {
+        self.impl_execute_on(
+            Operation::Write,
+            self.config.db.clone(),
+            self.config.imp_user.clone(),
+            &[],
+            Some(self.config.fetch_size),
+            max_result_bytes,
             q.into(),
         )
         .await
@@ -340,6 +376,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
+            None,
             q.into(),
         )
         .await
@@ -386,6 +423,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
+            None,
             q.into(),
         )
         .await
@@ -399,6 +437,7 @@ impl Graph {
         imp_user: Option<ImpersonateUser>,
         bookmarks: &[String],
         fetch_size: Option<usize>,
+        max_result_bytes: Option<usize>,
         query: Query,
     ) -> Result<DetachedRowStream> {
         let query = query.into_retryable(
@@ -407,6 +446,7 @@ impl Graph {
             operation,
             &self.pool,
             fetch_size.or(Some(self.config.fetch_size)),
+            max_result_bytes,
             bookmarks,
         );
 

@@ -172,7 +172,8 @@ impl Connection {
 
     pub async fn send_recv(&mut self, message: BoltRequest) -> Result<BoltResponse> {
         self.send(message).await?;
-        self.recv().await
+        let (response, _) = self.recv().await?;
+        Ok(response)
     }
 
     #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
@@ -197,9 +198,11 @@ impl Connection {
         self.send_bytes(bytes).await
     }
 
-    pub async fn recv(&mut self) -> Result<BoltResponse> {
+    pub async fn recv(&mut self) -> Result<(BoltResponse, usize)> {
         let bytes = self.recv_bytes().await?;
-        BoltResponse::parse(self.version, bytes)
+        let total_bytes_read = bytes.len();
+        let response = BoltResponse::parse(self.version, bytes)?;
+        Ok((response, total_bytes_read))
     }
 
     #[cfg(feature = "unstable-bolt-protocol-impl-v2")]

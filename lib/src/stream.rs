@@ -37,7 +37,10 @@ pub struct RowStream {
     available_after: i64,
     state: State,
     fetch_size: usize,
+    max_result_bytes: Option<usize>,
     buffer: VecDeque<Row>,
+    /// Cumulative number of bytes read from the server for this query.
+    total_bytes_read: usize,
 }
 
 impl RowStream {
@@ -46,6 +49,7 @@ impl RowStream {
         #[cfg(feature = "unstable-bolt-protocol-impl-v2")] available_after: i64,
         fields: BoltList,
         fetch_size: usize,
+        max_result_bytes: Option<usize>,
     ) -> Self {
         RowStream {
             qid,
@@ -53,8 +57,10 @@ impl RowStream {
             available_after,
             fields,
             fetch_size,
+            max_result_bytes,
             state: State::Ready,
             buffer: VecDeque::with_capacity(fetch_size),
+            total_bytes_read: 0,
         }
     }
 }
@@ -72,6 +78,14 @@ pub struct DetachedRowStream {
 impl DetachedRowStream {
     pub(crate) fn new(stream: RowStream, connection: ManagedConnection) -> Self {
         DetachedRowStream { stream, connection }
+    }
+    /// Returns the cumulative number of bytes read from the server for this query.
+    ///
+    /// This value counts all bytes received from the server for the query, including Bolt protocol
+    /// message bytes and headers. It can be useful for monitoring network usage, debugging, or
+    /// optimizing queries that transfer large amounts of data.
+    pub fn total_bytes_read(&self) -> usize {
+        self.stream.total_bytes_read
     }
 }
 
@@ -127,19 +141,25 @@ impl RowStream {
                     connection.send(pull).await?;
 
                     self.state = loop {
-                        match connection.recv().await {
-                            Ok(BoltResponse::Success(s)) => {
+                        let res = connection.recv().await;
+
+                        match res {
+                            Ok((BoltResponse::Success(s), total_bytes_read)) => {
+                                self.add_bytes_and_check_limit(total_bytes_read)?;
+
                                 break if s.get("has_more").unwrap_or(false) {
                                     State::Ready
                                 } else {
                                     State::Complete(())
                                 };
                             }
-                            Ok(BoltResponse::Record(record)) => {
+                            Ok((BoltResponse::Record(record), total_bytes_read)) => {
+                                self.add_bytes_and_check_limit(total_bytes_read)?;
+
                                 let row = Row::new(self.fields.clone(), record.data);
                                 self.buffer.push_back(row);
                             }
-                            Ok(msg) => return Err(msg.into_error("PULL")),
+                            Ok((msg, _total_bytes_read)) => return Err(msg.into_error("PULL")),
                             Err(e) => return Err(e),
                         }
                     };
@@ -148,6 +168,21 @@ impl RowStream {
                 };
             }
         }
+    }
+
+    /// Adds to the total bytes read and enforces the configured result size limit.
+    fn add_bytes_and_check_limit(&mut self, bytes_read: usize) -> Result<(), Error> {
+        self.total_bytes_read += bytes_read;
+
+        if let Some(max_result_bytes) = self.max_result_bytes {
+            if self.total_bytes_read > max_result_bytes {
+                return Err(Error::ExceededResultLimit(format!(
+                    "Bolt message bytes exceeded the configured limit ({} > {}).",
+                    self.total_bytes_read, max_result_bytes
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Return the [`RowStream::next`] item,

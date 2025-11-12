@@ -452,7 +452,8 @@ impl<'de> Deserializer<'de> for BoltTypeDeserializer<'de> {
                     "chrono::naive::datetime::serde::NaiveDateTimeVisitor" => {
                         format!("{:?}", datetime.naive_local())
                     }
-                    _ => datetime.to_rfc3339(),
+                    // Convert to RFC3339 string with milliseconds precision
+                    _ => datetime.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 };
                 visitor.visit_string(value)
             }

@@ -113,6 +113,7 @@ impl Query {
         operation: Operation,
         pool: &'a ConnectionPoolManager,
         fetch_size: Option<usize>,
+        max_result_bytes: Option<usize>,
         bookmarks: &'a [String],
     ) -> RetryableQuery<'a> {
         let query = match db.as_deref() {
@@ -134,6 +135,7 @@ impl Query {
             query,
             operation,
             fetch_size,
+            max_result_bytes,
             db,
             imp_user,
             bookmarks: bookmarks.to_vec(),
@@ -151,10 +153,11 @@ impl Query {
     pub(crate) async fn execute_retryable(
         &self,
         fetch_size: usize,
+        max_result_bytes: Option<usize>,
         mut connection: ManagedConnection,
     ) -> QueryResult<DetachedRowStream> {
         let request = BoltRequest::run(&self.query, self.params.clone(), self.extra.clone());
-        Self::try_execute(request, fetch_size, &mut connection)
+        Self::try_execute(request, fetch_size, max_result_bytes, &mut connection)
             .await
             .map(|stream| DetachedRowStream::new(stream, connection))
     }
@@ -162,10 +165,11 @@ impl Query {
     pub(crate) async fn execute_mut(
         self,
         fetch_size: usize,
+        max_result_bytes: Option<usize>,
         connection: &mut ManagedConnection,
     ) -> Result<RowStream> {
         let run = BoltRequest::run(&self.query, self.params, self.extra);
-        Self::try_execute(run, fetch_size, connection)
+        Self::try_execute(run, fetch_size, max_result_bytes, connection)
             .await
             .map_err(Retry::into_inner)
     }
@@ -174,13 +178,14 @@ impl Query {
         request: BoltRequest,
         connection: &mut ManagedConnection,
     ) -> QueryResult<RunResult> {
-        let result = Self::try_execute(request, 4096, connection).await?;
+        let result = Self::try_execute(request, 4096, None, connection).await?;
         Ok(result.finish(connection).await?)
     }
 
     async fn try_execute(
         request: BoltRequest,
         fetch_size: usize,
+        max_result_bytes: Option<usize>,
         connection: &mut ManagedConnection,
     ) -> QueryResult<RowStream> {
         Self::try_request(request, connection).await.map(|success| {
@@ -190,12 +195,12 @@ impl Query {
             #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
             {
                 let available: i64 = success.get("t_first").unwrap_or(-1);
-                RowStream::new(qid, available, fields, fetch_size)
+                RowStream::new(qid, available, fields, fetch_size, max_result_bytes)
             }
 
             #[cfg(not(feature = "unstable-bolt-protocol-impl-v2"))]
             {
-                RowStream::new(qid, fields, fetch_size)
+                RowStream::new(qid, fields, fetch_size, max_result_bytes)
             }
         })
     }
@@ -253,6 +258,7 @@ pub(crate) struct RetryableQuery<'a> {
     query: Query,
     operation: Operation,
     fetch_size: Option<usize>,
+    max_result_bytes: Option<usize>,
     db: Option<Database>,
     imp_user: Option<ImpersonateUser>,
     bookmarks: Vec<String>,
@@ -282,7 +288,11 @@ impl<'a> RetryableQuery<'a> {
 
         let connection = self.connect().await?;
         self.query
-            .execute_retryable(self.fetch_size.expect("fetch_size must be set"), connection)
+            .execute_retryable(
+                self.fetch_size.expect("fetch_size must be set"),
+                self.max_result_bytes,
+                connection,
+            )
             .await
     }
 

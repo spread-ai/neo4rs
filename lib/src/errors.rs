@@ -111,6 +111,9 @@ pub enum Error {
 
     #[error("{0}")]
     ServerUnavailableError(String),
+
+    #[error("{0}")]
+    ExceededResultLimit(String),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
