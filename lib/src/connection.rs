@@ -199,7 +199,8 @@ impl Connection {
     }
 
     pub async fn recv(&mut self) -> Result<(BoltResponse, usize)> {
-        let (bytes, total_bytes_read) = self.recv_bytes().await?;
+        let bytes = self.recv_bytes().await?;
+        let total_bytes_read = bytes.len();
         let response = BoltResponse::parse(self.version, bytes)?;
         Ok((response, total_bytes_read))
     }
@@ -223,8 +224,7 @@ impl Connection {
         Ok(())
     }
 
-    async fn recv_bytes(&mut self) -> Result<(Bytes, usize)> {
-        let mut total_bytes_read = 0;
+    async fn recv_bytes(&mut self) -> Result<Bytes> {
         let mut bytes = BytesMut::new();
         let mut chunk_size = 0;
         while chunk_size == 0 {
@@ -233,14 +233,12 @@ impl Connection {
 
         while chunk_size > 0 {
             self.read_chunk(chunk_size, &mut bytes).await?;
-            // Include the header size
-            total_bytes_read += chunk_size + 2;
             chunk_size = self.read_chunk_size().await?;
         }
 
         let bytes = bytes.freeze();
         Self::dbg("recv", &bytes);
-        Ok((bytes, total_bytes_read))
+        Ok(bytes)
     }
 
     async fn read_chunk_size(&mut self) -> Result<usize> {
