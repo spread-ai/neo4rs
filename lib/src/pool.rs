@@ -24,8 +24,9 @@ impl ConnectionManager {
         user: &str,
         password: &str,
         tls_config: &ConnectionTLSConfig,
+        connection_timeout: Option<Duration>,
     ) -> Result<Self> {
-        let info = ConnectionInfo::new(uri, user, password, tls_config)?;
+        let info = ConnectionInfo::new(uri, user, password, tls_config, connection_timeout)?;
         let backoff = backoff();
         Ok(ConnectionManager { info, backoff })
     }
@@ -66,6 +67,7 @@ pub fn create_pool(config: &Config) -> Result<ConnectionPool> {
         &config.user,
         &config.password,
         &config.tls_config,
+        config.connection_timeout,
     )?;
     info!(
         "creating connection pool for node {} with max size {}",

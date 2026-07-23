@@ -53,6 +53,21 @@ pub struct Connection {
 
 impl Connection {
     pub(crate) async fn new(info: &ConnectionInfo) -> Result<Self> {
+        match info.prepare.connection_timeout {
+            Some(limit) => tokio::time::timeout(limit, Self::establish(info))
+                .await
+                .map_err(|_| Error::IOError {
+                    detail: std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("connection could not be established within {limit:?}"),
+                    ),
+                })?,
+            None => Self::establish(info).await,
+        }
+    }
+
+    /// TCP connect + optional TLS handshake + Bolt handshake/hello.
+    async fn establish(info: &ConnectionInfo) -> Result<Self> {
         let mut connection = Self::prepare(&info.prepare).await?;
         let hello = info.init.to_hello(connection.version);
         connection.hello(hello).await?;
@@ -310,6 +325,7 @@ pub(crate) struct PrepareOpts {
     pub(crate) host: Host<Arc<str>>,
     pub(crate) port: u16,
     pub(crate) encryption: Option<(TlsConnector, ServerName<'static>)>,
+    pub(crate) connection_timeout: Option<std::time::Duration>,
 }
 
 impl Debug for PrepareOpts {
@@ -387,6 +403,7 @@ impl ConnectionInfo {
         user: &str,
         password: &str,
         tls_config: &ConnectionTLSConfig,
+        connection_timeout: Option<std::time::Duration>,
     ) -> Result<Self> {
         let mut url = NeoUrl::parse(uri)?;
 
@@ -440,6 +457,7 @@ impl ConnectionInfo {
             host,
             port: url.port(),
             encryption,
+            connection_timeout,
         };
 
         let init = InitOpts {
@@ -754,7 +772,34 @@ impl ServerCertVerifier for NoCertificateVerification {
 mod tests {
     use url::Host;
 
-    use super::NeoUrl;
+    use super::{Connection, ConnectionInfo, NeoUrl};
+    use crate::auth::ConnectionTLSConfig;
+    use crate::errors::Error;
+    use std::time::{Duration, Instant};
+
+    // A bound listener that never accepts lets the TCP handshake complete
+    // (backlog) but stalls the Bolt handshake, so without a timeout the
+    // connect blocks forever -- the failure mode this test guards against.
+    #[tokio::test]
+    async fn connection_timeout_bounds_unresponsive_server() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let info = ConnectionInfo::new(
+            &format!("bolt://{addr}"),
+            "neo4j",
+            "password",
+            &ConnectionTLSConfig::None,
+            Some(Duration::from_millis(250)),
+        )
+        .unwrap();
+
+        let started = Instant::now();
+        let res = Connection::new(&info).await;
+
+        assert!(matches!(res, Err(Error::IOError { .. })));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     fn should_parse_uri() {

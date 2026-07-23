@@ -3,6 +3,7 @@ use crate::errors::{Error, Result};
 #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
 use serde::{Deserialize, Deserializer, Serialize};
 use std::path::Path;
+use std::time::Duration;
 use std::{ops::Deref, sync::Arc};
 
 const DEFAULT_FETCH_SIZE: usize = 200;
@@ -131,6 +132,7 @@ pub struct Config {
     pub(crate) fetch_size: usize,
     pub(crate) imp_user: Option<ImpersonateUser>,
     pub(crate) tls_config: ConnectionTLSConfig,
+    pub(crate) connection_timeout: Option<Duration>,
 }
 
 impl Config {
@@ -153,6 +155,7 @@ pub struct ConfigBuilder {
     max_connections: usize,
     imp_user: Option<ImpersonateUser>,
     tls_config: ConnectionTLSConfig,
+    connection_timeout: Option<Duration>,
 }
 
 impl ConfigBuilder {
@@ -240,6 +243,16 @@ impl ConfigBuilder {
         self
     }
 
+    /// Maximum time to wait for a single connection to be established,
+    /// covering TCP connect, TLS handshake, and the Bolt hello exchange.
+    ///
+    /// If not set (the default), connection establishment has no upper
+    /// bound: a black-holed TCP connect can block the caller indefinitely.
+    pub fn connection_timeout(mut self, connection_timeout: Duration) -> Self {
+        self.connection_timeout = Some(connection_timeout);
+        self
+    }
+
     pub fn build(self) -> Result<Config> {
         if let (Some(uri), Some(user), Some(password)) = (self.uri, self.user, self.password) {
             Ok(Config {
@@ -251,6 +264,7 @@ impl ConfigBuilder {
                 db: self.db,
                 imp_user: self.imp_user,
                 tls_config: self.tls_config,
+                connection_timeout: self.connection_timeout,
             })
         } else {
             Err(Error::InvalidConfig)
@@ -269,6 +283,7 @@ impl Default for ConfigBuilder {
             imp_user: None,
             fetch_size: DEFAULT_FETCH_SIZE,
             tls_config: ConnectionTLSConfig::None,
+            connection_timeout: None,
         }
     }
 }

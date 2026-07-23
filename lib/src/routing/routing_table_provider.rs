@@ -39,6 +39,7 @@ impl RoutingTableProvider for ClusterRoutingTableProvider {
                 &config.user,
                 &config.password,
                 &config.tls_config,
+                config.connection_timeout,
             )?;
             let mut connection = Connection::new(&info).await?;
             let mut builder = RouteBuilder::new(info.init.routing, bookmarks);

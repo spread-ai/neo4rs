@@ -89,6 +89,7 @@ impl Graph {
                 &config.user,
                 &config.password,
                 &config.tls_config,
+                config.connection_timeout,
             )?;
             if matches!(info.init.routing, Routing::Yes(_)) {
                 debug!("Routing enabled, creating a routed connection manager");
