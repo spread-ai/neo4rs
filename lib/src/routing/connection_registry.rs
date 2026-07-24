@@ -213,6 +213,7 @@ mod tests {
             fetch_size: 200,
             tls_config: ConnectionTLSConfig::None,
             imp_user: None,
+            recv_timeout: None,
             connection_timeout: std::time::Duration::from_secs(30),
             tcp_keepalive: Some(std::time::Duration::from_secs(60)),
             idle_timeout: None,

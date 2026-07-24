@@ -272,6 +272,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
+            None,
             q.into(),
         )
         .await
@@ -404,6 +405,7 @@ impl Graph {
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
+            None,
             q.into(),
         )
         .await

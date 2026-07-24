@@ -69,6 +69,9 @@ impl Txn {
             Summary::Success(response) => Ok(Txn {
                 db: response.metadata.db.or(db),
                 fetch_size,
+                // Result-size limiting (fork #1) is not plumbed through the
+                // unstable-bolt-protocol-impl-v2 session path.
+                max_result_bytes: None,
                 connection,
                 operation,
                 bookmark: None,
