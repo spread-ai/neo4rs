@@ -151,7 +151,7 @@ impl Point3D {
 impl Row {
     pub fn new(fields: BoltList, data: BoltList) -> Self {
         let mut attributes = BoltMap::with_capacity(fields.len());
-        for (field, value) in fields.into_iter().zip(data.into_iter()) {
+        for (field, value) in fields.into_iter().zip(data) {
             if let Ok(key) = field.try_into() {
                 attributes.put(key, value);
             }

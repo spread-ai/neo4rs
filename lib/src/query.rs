@@ -106,6 +106,7 @@ impl Query {
             .map_err(Retry::into_inner)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn into_retryable<'a>(
         self,
         db: Option<Database>,

@@ -435,6 +435,7 @@ impl Graph {
     }
 
     #[allow(unused_variables)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn impl_execute_on(
         &self,
         operation: Operation,

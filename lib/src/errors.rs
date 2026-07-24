@@ -279,6 +279,15 @@ impl Neo4jError {
     }
 }
 
+impl std::convert::From<deadpool::managed::PoolError<Error>> for Error {
+    fn from(e: deadpool::managed::PoolError<Error>) -> Self {
+        match e {
+            deadpool::managed::PoolError::Backend(e) => e,
+            _ => Error::ConnectionError,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,14 +296,5 @@ mod tests {
     fn should_display_connection_timed_out() {
         let error = Error::ConnectionTimedOut;
         assert_eq!(format!("{}", error), "connection timed out");
-    }
-}
-
-impl std::convert::From<deadpool::managed::PoolError<Error>> for Error {
-    fn from(e: deadpool::managed::PoolError<Error>) -> Self {
-        match e {
-            deadpool::managed::PoolError::Backend(e) => e,
-            _ => Error::ConnectionError,
-        }
     }
 }

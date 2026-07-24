@@ -552,8 +552,8 @@ impl ConnectionInfo {
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(std::io::Error::other);
                 let keys = keys?.pop().unwrap();
-                if mutual.cert_file.is_some() {
-                    let root_cert_file = File::open(mutual.cert_file.as_ref().unwrap())?;
+                if let Some(cert_file) = mutual.cert_file.as_ref() {
+                    let root_cert_file = File::open(cert_file)?;
                     let root_reader = BufReader::new(root_cert_file);
                     let root_certs = CertificateDer::pem_reader_iter(root_reader).flatten();
                     root_cert_store.add_parsable_certificates(root_certs);

@@ -37,6 +37,9 @@ pub struct RowStream {
     available_after: i64,
     state: State,
     fetch_size: usize,
+    // Result-size limiting (fork #1) is only plumbed through the default
+    // (non-unstable-bolt-protocol-impl-v2) execution path.
+    #[cfg_attr(feature = "unstable-bolt-protocol-impl-v2", allow(dead_code))]
     max_result_bytes: Option<usize>,
     buffer: VecDeque<Row>,
     /// Cumulative number of bytes read from the server for this query.
@@ -171,6 +174,7 @@ impl RowStream {
     }
 
     /// Adds to the total bytes read and enforces the configured result size limit.
+    #[cfg_attr(feature = "unstable-bolt-protocol-impl-v2", allow(dead_code))]
     fn add_bytes_and_check_limit(&mut self, bytes_read: usize) -> Result<(), Error> {
         self.total_bytes_read += bytes_read;
 
