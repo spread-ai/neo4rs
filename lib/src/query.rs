@@ -106,6 +106,7 @@ impl Query {
             .map_err(Retry::into_inner)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn into_retryable<'a>(
         self,
         db: Option<Database>,
@@ -264,7 +265,7 @@ pub(crate) struct RetryableQuery<'a> {
     bookmarks: Vec<String>,
 }
 
-impl<'a> RetryableQuery<'a> {
+impl RetryableQuery<'_> {
     pub(crate) async fn retry_run(self) -> (Self, QueryResult<RunResult>) {
         let result = self.run().await;
         (self, result)

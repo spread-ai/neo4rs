@@ -90,6 +90,7 @@ impl Session {
                 self.imp_user.clone(),
                 &self.bookmarks,
                 self.fetch_size,
+                None,
                 query.into(),
             )
             .await
@@ -116,6 +117,7 @@ impl Session {
                 self.imp_user.clone(),
                 &self.bookmarks,
                 self.fetch_size,
+                None,
                 query.into(),
             )
             .await
@@ -133,6 +135,7 @@ impl Session {
                 self.imp_user.clone(),
                 &self.bookmarks,
                 self.fetch_size,
+                None,
                 query.into(),
             )
             .await

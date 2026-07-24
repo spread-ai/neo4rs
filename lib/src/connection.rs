@@ -23,9 +23,10 @@ use bytes::{BufMut, Bytes, BytesMut};
 use log::{info, warn};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
-use rustls::pki_types::{CertificateDer, UnixTime};
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use std::fmt::{Debug, Display, Formatter};
+use std::time::Duration;
 use std::{fs::File, io::BufReader, mem, sync::Arc};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufStream},
@@ -46,6 +47,8 @@ const MAX_CHUNK_SIZE: usize = 65_535 - mem::size_of::<u16>();
 pub struct Connection {
     version: Version,
     stream: BufStream<ConnectionStream>,
+    /// Timeout applied to each single-message recv, when configured.
+    recv_timeout: Option<Duration>,
     #[allow(unused)]
     #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
     hints: Option<ConnectionsHints>,
@@ -53,6 +56,16 @@ pub struct Connection {
 
 impl Connection {
     pub(crate) async fn new(info: &ConnectionInfo) -> Result<Self> {
+        // Bound the WHOLE establishment (TCP connect + TLS handshake + Bolt
+        // version exchange + hello), not just the TCP connect that
+        // `prepare` bounds internally: a peer that accepts the socket but
+        // never answers the handshake would otherwise hang forever.
+        tokio::time::timeout(info.prepare.connection_timeout, Self::establish(info))
+            .await
+            .map_err(|_| Error::ConnectionTimedOut)?
+    }
+
+    async fn establish(info: &ConnectionInfo) -> Result<Self> {
         let mut connection = Self::prepare(&info.prepare).await?;
         let hello = info.init.to_hello(connection.version);
         connection.hello(hello).await?;
@@ -63,22 +76,46 @@ impl Connection {
         self.version
     }
 
+    /// Configure TCP keepalive on the given `TcpStream` using `socket2`.
+    fn configure_tcp_keepalive(stream: &TcpStream, keepalive: Option<Duration>) -> Result<()> {
+        if let Some(interval) = keepalive {
+            let sock_ref = socket2::SockRef::from(stream);
+            let keepalive = socket2::TcpKeepalive::new()
+                .with_time(interval)
+                .with_interval(Duration::from_secs(10));
+            #[cfg(not(windows))]
+            let keepalive = keepalive.with_retries(3);
+            sock_ref.set_tcp_keepalive(&keepalive)?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn prepare(opts: &PrepareOpts) -> Result<Self> {
-        let mut stream = match &opts.host {
-            Host::Domain(domain) => TcpStream::connect((&**domain, opts.port)).await?,
-            Host::Ipv4(ip) => TcpStream::connect((*ip, opts.port)).await?,
-            Host::Ipv6(ip) => TcpStream::connect((*ip, opts.port)).await?,
+        let timeout_dur = opts.connection_timeout;
+        let connect_future = async {
+            match &opts.host {
+                Host::Domain(domain) => TcpStream::connect((&**domain, opts.port)).await,
+                Host::Ipv4(ip) => TcpStream::connect((*ip, opts.port)).await,
+                Host::Ipv6(ip) => TcpStream::connect((*ip, opts.port)).await,
+            }
         };
+        let stream = tokio::time::timeout(timeout_dur, connect_future)
+            .await
+            .map_err(|_| Error::ConnectionTimedOut)??;
+
+        // Configure TCP keepalive on the raw socket
+        Self::configure_tcp_keepalive(&stream, opts.tcp_keepalive)?;
 
         Ok(match &opts.encryption {
             Some((connector, domain)) => {
                 let mut stream = connector.connect(domain.clone(), stream).await?;
                 let version = Self::init(&mut stream).await?;
-                Self::create(stream, version)
+                Self::create(stream, version, opts.recv_timeout)
             }
             None => {
+                let mut stream = stream;
                 let version = Self::init(&mut stream).await?;
-                Self::create(stream, version)
+                Self::create(stream, version, opts.recv_timeout)
             }
         })
     }
@@ -94,10 +131,15 @@ impl Connection {
         Ok(version)
     }
 
-    fn create(stream: impl Into<ConnectionStream>, version: Version) -> Connection {
+    fn create(
+        stream: impl Into<ConnectionStream>,
+        version: Version,
+        recv_timeout: Option<Duration>,
+    ) -> Connection {
         Connection {
             version,
             stream: BufStream::new(stream.into()),
+            recv_timeout,
             #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
             hints: None,
         }
@@ -199,7 +241,12 @@ impl Connection {
     }
 
     pub async fn recv(&mut self) -> Result<(BoltResponse, usize)> {
-        let bytes = self.recv_bytes().await?;
+        let bytes = match self.recv_timeout {
+            Some(limit) => tokio::time::timeout(limit, self.recv_bytes())
+                .await
+                .map_err(|_| Error::ConnectionTimedOut)??,
+            None => self.recv_bytes().await?,
+        };
         let total_bytes_read = bytes.len();
         let response = BoltResponse::parse(self.version, bytes)?;
         Ok((response, total_bytes_read))
@@ -310,6 +357,9 @@ pub(crate) struct PrepareOpts {
     pub(crate) host: Host<Arc<str>>,
     pub(crate) port: u16,
     pub(crate) encryption: Option<(TlsConnector, ServerName<'static>)>,
+    pub(crate) connection_timeout: Duration,
+    pub(crate) recv_timeout: Option<Duration>,
+    pub(crate) tcp_keepalive: Option<Duration>,
 }
 
 impl Debug for PrepareOpts {
@@ -348,7 +398,7 @@ impl InitOpts {
     }
 
     #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
-    pub(crate) fn to_hello(&self, version: Version) -> Hello {
+    pub(crate) fn to_hello(&self, version: Version) -> Hello<'_> {
         match self.routing {
             Routing::No => HelloBuilder::new(&self.user, &self.password).build(version),
             Routing::Yes(ref routing) => HelloBuilder::new(&self.user, &self.password)
@@ -387,6 +437,9 @@ impl ConnectionInfo {
         user: &str,
         password: &str,
         tls_config: &ConnectionTLSConfig,
+        connection_timeout: Duration,
+        recv_timeout: Option<Duration>,
+        tcp_keepalive: Option<Duration>,
     ) -> Result<Self> {
         let mut url = NeoUrl::parse(uri)?;
 
@@ -440,6 +493,9 @@ impl ConnectionInfo {
             host,
             port: url.port(),
             encryption,
+            connection_timeout,
+            recv_timeout,
+            tcp_keepalive,
         };
 
         let init = InitOpts {
@@ -474,8 +530,8 @@ impl ConnectionInfo {
             }
             ConnectionTLSConfig::ClientCACertificate(certificate) => {
                 let cert_file = File::open(&certificate.cert_file)?;
-                let mut reader = BufReader::new(cert_file);
-                let certs = rustls_pemfile::certs(&mut reader).flatten();
+                let reader = BufReader::new(cert_file);
+                let certs = CertificateDer::pem_reader_iter(reader).flatten();
                 root_cert_store.add_parsable_certificates(certs);
                 builder
                     .with_root_certificates(root_cert_store)
@@ -487,17 +543,19 @@ impl ConnectionInfo {
                 .with_no_client_auth(),
             ConnectionTLSConfig::MutualTLS(mutual) => {
                 let cert_file = File::open(&mutual.client_cert)?;
-                let mut cert_reader = BufReader::new(cert_file);
-                let cert_certs = rustls_pemfile::certs(&mut cert_reader).flatten();
+                let cert_reader = BufReader::new(cert_file);
+                let cert_certs = CertificateDer::pem_reader_iter(cert_reader).flatten();
 
                 let cert_key = File::open(&mutual.client_key)?;
-                let mut key_reader = BufReader::new(cert_key);
-                let keys = rustls_pemfile::private_key(&mut key_reader);
-                let keys = keys?.unwrap();
-                if mutual.cert_file.is_some() {
-                    let root_cert_file = File::open(mutual.cert_file.as_ref().unwrap())?;
-                    let mut root_reader = BufReader::new(root_cert_file);
-                    let root_certs = rustls_pemfile::certs(&mut root_reader).flatten();
+                let key_reader = BufReader::new(cert_key);
+                let keys = PrivateKeyDer::pem_reader_iter(key_reader)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(std::io::Error::other);
+                let keys = keys?.pop().unwrap();
+                if let Some(cert_file) = mutual.cert_file.as_ref() {
+                    let root_cert_file = File::open(cert_file)?;
+                    let root_reader = BufReader::new(root_cert_file);
+                    let root_certs = CertificateDer::pem_reader_iter(root_reader).flatten();
                     root_cert_store.add_parsable_certificates(root_certs);
                     builder
                         .with_root_certificates(root_cert_store)
@@ -754,7 +812,37 @@ impl ServerCertVerifier for NoCertificateVerification {
 mod tests {
     use url::Host;
 
-    use super::NeoUrl;
+    use super::{Connection, ConnectionInfo, NeoUrl};
+    use crate::auth::ConnectionTLSConfig;
+    use crate::errors::Error;
+    use std::time::{Duration, Instant};
+
+    // A bound listener that never accepts lets the TCP handshake complete
+    // (backlog) but stalls the Bolt version exchange. The upstream per-stage
+    // bound only covers the TCP connect, so without the whole-establishment
+    // timeout in `Connection::new` this would hang forever.
+    #[tokio::test]
+    async fn connection_timeout_bounds_unresponsive_server() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let info = ConnectionInfo::new(
+            &format!("bolt://{addr}"),
+            "neo4j",
+            "password",
+            &ConnectionTLSConfig::None,
+            Duration::from_millis(250),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let started = Instant::now();
+        let res = Connection::new(&info).await;
+
+        assert!(matches!(res, Err(Error::ConnectionTimedOut)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     fn should_parse_uri() {
