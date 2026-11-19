@@ -85,12 +85,31 @@
 //! Start a new transaction using [`Graph::start_txn`], which will return a handle [`Txn`] that can
 //! be used to [`Txn::commit`] or [`Txn::rollback`] the transaction.
 //!
+//! Use [`TransactionConfig`] with [`Graph::start_txn_with_config`] or
+//! [`Graph::start_txn_on_with_config`] to attach transaction metadata or set a server-side
+//! timeout.
+//!
 //! Note that the handle takes a connection from the connection pool, which will be released once
 //! the Txn is dropped
+//!
+//! ```no_run
+//! # async fn example(graph: &neo4rs::Graph) -> neo4rs::Result<()> {
+//! let mut txn = graph
+//!     .start_txn_with_config(
+//!         neo4rs::TransactionConfig::default()
+//!             .with_tx_metadata(vec![("operation".into(), "import".into())])
+//!             .with_tx_timeout(std::time::Duration::from_secs(15)),
+//!     )
+//!     .await?;
+//! txn.rollback().await?;
+//! # Ok(())
+//! # }
+//! ```
 //!
 //!
 //! ```no_run
 //! use neo4rs::*;
+//! use std::time::Duration;
 //!
 //! #[tokio::main]
 //! async fn main() {
@@ -130,13 +149,17 @@
 //!
 //! ```
 //!
-//! ### Streams are evaluated lazily
+//! ### Streams fetch their results in batches
 //!
-//! The [`RowStream`] returned by various `execute` functions need to be
-//! consumed with [`RowStream::next`] in order to actually execute the
-//! query.
-//! The various `run` functions on the other hand are always executed
-//! eagerly.
+//! [`Graph::execute`] sends the query together with the request for the first
+//! batch of results, so the query runs on the server right away. The following
+//! batches are fetched when the [`DetachedRowStream`] is consumed with
+//! [`DetachedRowStream::next`].
+//! Within a transaction, [`Txn::execute`] returns a [`RowStream`] that only
+//! runs the query when it is consumed with [`RowStream::next`] for the first
+//! time, because several streams can share the connection of the transaction.
+//! The various `run` functions are always executed eagerly and discard the
+//! results.
 //!
 //!
 //! ```no_run
@@ -529,11 +552,11 @@ pub use crate::config::{Config, ConfigBuilder, Database};
 pub use crate::errors::{
     Error, Neo4jClientErrorKind, Neo4jError, Neo4jErrorKind, Neo4jSecurityErrorKind, Result,
 };
-pub use crate::graph::{query, Graph};
+pub use crate::graph::{Graph, query};
 pub use crate::query::{Query, QueryParameter, RunResult};
 pub use crate::row::{Node, Path, Point2D, Point3D, Relation, Row, UnboundedRelation};
 pub use crate::stream::{DetachedRowStream, RowStream};
-pub use crate::txn::Txn;
+pub use crate::txn::{TransactionConfig, Txn};
 pub use crate::types::serde::{
     DeError, EndNodeId, Id, Indices, Keys, Labels, Nodes, Offset, Relationships, StartNodeId,
     Timezone, Type,
@@ -544,7 +567,6 @@ pub use crate::types::{
     BoltPoint2D, BoltPoint3D, BoltRelation, BoltString, BoltTime, BoltType, BoltUnboundedRelation,
 };
 pub use crate::version::Version;
-pub(crate) use messages::Success;
 use neo4rs_include_snippet::include_snippet;
 use std::fmt::Display;
 

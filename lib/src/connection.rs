@@ -5,7 +5,7 @@ use crate::messages::HelloBuilder;
 use {
     crate::bolt::{
         ConnectionsHints, ExpectedResponse, Hello, HelloBuilder, Message, MessageResponse, Reset,
-        Summary,
+        Rollback, Summary,
     },
     log::debug,
 };
@@ -13,18 +13,19 @@ use {
 #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
 use crate::routing::{Route, RoutingTable};
 use crate::{
+    BoltMap, BoltString, BoltType,
     connection::stream::ConnectionStream,
     errors::{Error, Result},
     messages::{BoltRequest, BoltResponse},
     version::Version,
-    BoltMap, BoltString, BoltType,
 };
 use bytes::{BufMut, Bytes, BytesMut};
 use log::{info, warn};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
-use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, UnixTime};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime, pem::PemObject};
 use rustls::{DigitallySignedStruct, SignatureScheme};
+use rustls_platform_verifier::BuilderVerifierExt;
 use std::fmt::{Debug, Display, Formatter};
 use std::time::Duration;
 use std::{fs::File, io::BufReader, mem, sync::Arc};
@@ -33,15 +34,22 @@ use tokio::{
     net::TcpStream,
 };
 use tokio_rustls::{
-    rustls::{
-        pki_types::{IpAddr, Ipv4Addr, Ipv6Addr, ServerName},
-        ClientConfig, RootCertStore,
-    },
     TlsConnector,
+    rustls::{
+        ClientConfig, RootCertStore,
+        pki_types::{IpAddr, Ipv4Addr, Ipv6Addr, ServerName},
+    },
 };
 use url::{Host, Url};
 
 const MAX_CHUNK_SIZE: usize = 65_535 - mem::size_of::<u16>();
+const SUCCESS_SIGNATURE: u8 = 0x70;
+const RECORD_SIGNATURE: u8 = 0x71;
+const IGNORED_SIGNATURE: u8 = 0x7e;
+const FAILURE_SIGNATURE: u8 = 0x7f;
+
+#[cfg(test)]
+mod reuse_tests;
 
 #[derive(Debug)]
 pub struct Connection {
@@ -49,6 +57,8 @@ pub struct Connection {
     stream: BufStream<ConnectionStream>,
     /// Timeout applied to each single-message recv, when configured.
     recv_timeout: Option<Duration>,
+    pending_responses: usize,
+    io_in_progress: bool,
     #[allow(unused)]
     #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
     hints: Option<ConnectionsHints>,
@@ -140,6 +150,8 @@ impl Connection {
             version,
             stream: BufStream::new(stream.into()),
             recv_timeout,
+            pending_responses: 0,
+            io_in_progress: false,
             #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
             hints: None,
         }
@@ -212,6 +224,26 @@ impl Connection {
         }
     }
 
+    pub(crate) async fn rollback_transaction(&mut self) -> Result<()> {
+        #[cfg(not(feature = "unstable-bolt-protocol-impl-v2"))]
+        {
+            match self.send_recv(BoltRequest::rollback()).await? {
+                BoltResponse::Success(_) => Ok(()),
+                BoltResponse::Ignore(_) => self.reset().await,
+                msg => Err(msg.into_error("ROLLBACK")),
+            }
+        }
+
+        #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
+        {
+            match self.send_recv_as(Rollback).await? {
+                Summary::Success(_) => Ok(()),
+                Summary::Ignored => self.reset().await,
+                msg => Err(msg.into_error("ROLLBACK")),
+            }
+        }
+    }
+
     pub async fn send_recv(&mut self, message: BoltRequest) -> Result<BoltResponse> {
         self.send(message).await?;
         let (response, _) = self.recv().await?;
@@ -241,12 +273,7 @@ impl Connection {
     }
 
     pub async fn recv(&mut self) -> Result<(BoltResponse, usize)> {
-        let bytes = match self.recv_timeout {
-            Some(limit) => tokio::time::timeout(limit, self.recv_bytes())
-                .await
-                .map_err(|_| Error::ConnectionTimedOut)??,
-            None => self.recv_bytes().await?,
-        };
+        let bytes = self.recv_message().await?;
         let total_bytes_read = bytes.len();
         let response = BoltResponse::parse(self.version, bytes)?;
         Ok((response, total_bytes_read))
@@ -255,23 +282,102 @@ impl Connection {
     #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
     #[allow(unused)]
     pub(crate) async fn recv_as<T: MessageResponse>(&mut self) -> Result<T> {
-        let bytes = self.recv_bytes().await?;
+        let bytes = self.recv_message().await?;
         Ok(T::parse(bytes)?)
     }
 
+    /// Receives one message, within `recv_timeout` when configured, and counts it against the
+    /// outstanding requests.
+    async fn recv_message(&mut self) -> Result<Bytes> {
+        let bytes = match self.recv_timeout {
+            Some(limit) => tokio::time::timeout(limit, self.recv_bytes())
+                .await
+                .map_err(|_| Error::ConnectionTimedOut)??,
+            None => self.recv_bytes().await?,
+        };
+        self.complete_response(&bytes)?;
+        Ok(bytes)
+    }
+
+    pub(crate) fn is_reusable(&self) -> bool {
+        self.pending_responses == 0 && !self.io_in_progress
+    }
+
+    /// Receives the responses that are still outstanding for requests already sent,
+    /// so that a connection returned to the pool with a request in flight can be
+    /// reused. The responses are not decoded, only counted. A read that was
+    /// interrupted midway cannot be recovered because the framing is unknown.
+    pub(crate) async fn drain_pending_responses(&mut self) -> Result<()> {
+        if self.io_in_progress {
+            return Err(Error::IncompleteBoltExchange);
+        }
+        while self.pending_responses > 0 {
+            self.recv_message().await?;
+        }
+        Ok(())
+    }
+
+    fn complete_response(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.pending_responses == 0 {
+            return Err(Error::UnexpectedMessage("unsolicited Bolt response".into()));
+        }
+        match bytes.get(1).copied() {
+            Some(SUCCESS_SIGNATURE | FAILURE_SIGNATURE | IGNORED_SIGNATURE) => {
+                self.pending_responses -= 1
+            }
+            Some(RECORD_SIGNATURE) => {}
+            _ => {
+                return Err(Error::UnexpectedMessage(
+                    "unknown Bolt response signature".into(),
+                ));
+            }
+        }
+        self.io_in_progress = false;
+        Ok(())
+    }
+
     async fn send_bytes(&mut self, bytes: Bytes) -> Result<()> {
-        Self::dbg("send", &bytes);
+        self.send_pipelined([bytes]).await
+    }
+
+    /// Sends several requests in a single flush and expects one response per request.
+    ///
+    /// The server answers pipelined requests in order, so the caller must receive
+    /// every response before the connection is reusable again. After a FAILURE,
+    /// the server answers each of the following requests with IGNORED.
+    pub(crate) async fn send_pipelined(
+        &mut self,
+        messages: impl IntoIterator<Item = Bytes>,
+    ) -> Result<()> {
+        if !self.is_reusable() {
+            return Err(Error::IncompleteBoltExchange);
+        }
+        self.io_in_progress = true;
+        for bytes in messages {
+            self.pending_responses += 1;
+            self.write_message(&bytes).await?;
+        }
+        self.stream.flush().await?;
+        self.io_in_progress = false;
+        Ok(())
+    }
+
+    async fn write_message(&mut self, bytes: &Bytes) -> Result<()> {
+        Self::dbg("send", bytes);
         let end_marker: [u8; 2] = [0, 0];
         for c in bytes.chunks(MAX_CHUNK_SIZE) {
             self.stream.write_u16(c.len() as u16).await?;
             self.stream.write_all(c).await?;
         }
         self.stream.write_all(&end_marker).await?;
-        self.stream.flush().await?;
         Ok(())
     }
 
     async fn recv_bytes(&mut self) -> Result<Bytes> {
+        if self.io_in_progress {
+            return Err(Error::IncompleteBoltExchange);
+        }
+        self.io_in_progress = true;
         let mut bytes = BytesMut::new();
         let mut chunk_size = 0;
         while chunk_size == 0 {
@@ -299,10 +405,14 @@ impl Connection {
         }
         let mut remaining = chunk_size;
         while remaining > 0 {
-            remaining -= (&mut self.stream)
+            let received = (&mut self.stream)
                 .take(remaining as u64)
                 .read_buf(buf)
                 .await?;
+            if received == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            remaining -= received;
         }
         Ok(())
     }
@@ -515,19 +625,10 @@ impl ConnectionInfo {
 
         let builder = ClientConfig::builder();
         let config = match tls_config {
-            ConnectionTLSConfig::None => {
-                let native_certs = rustls_native_certs::load_native_certs();
-                if !native_certs.errors.is_empty() {
-                    warn!(
-                        "Failed to load native certificates: {:?}",
-                        native_certs.errors
-                    );
-                }
-                root_cert_store.add_parsable_certificates(native_certs.certs);
-                builder
-                    .with_root_certificates(root_cert_store)
-                    .with_no_client_auth()
-            }
+            ConnectionTLSConfig::None => builder
+                .with_platform_verifier()
+                .map_err(std::io::Error::other)?
+                .with_no_client_auth(),
             ConnectionTLSConfig::ClientCACertificate(certificate) => {
                 let cert_file = File::open(&certificate.cert_file)?;
                 let reader = BufReader::new(cert_file);
@@ -562,16 +663,9 @@ impl ConnectionInfo {
                         .with_client_auth_cert(cert_certs.collect(), keys)
                         .map_err(|_e| Error::ConnectionError)?
                 } else if mutual.validation {
-                    let native_certs = rustls_native_certs::load_native_certs();
-                    if !native_certs.errors.is_empty() {
-                        warn!(
-                            "Failed to load native certificates: {:?}",
-                            native_certs.errors
-                        );
-                    }
-                    root_cert_store.add_parsable_certificates(native_certs.certs);
                     builder
-                        .with_root_certificates(root_cert_store)
+                        .with_platform_verifier()
+                        .map_err(std::io::Error::other)?
                         .with_client_auth_cert(cert_certs.collect(), keys)
                         .map_err(|_e| Error::ConnectionError)?
                 } else {
@@ -814,8 +908,16 @@ mod tests {
 
     use super::{Connection, ConnectionInfo, NeoUrl};
     use crate::auth::ConnectionTLSConfig;
-    use crate::errors::Error;
-    use std::time::{Duration, Instant};
+    use crate::{errors::Error, version::Version};
+    use std::time::Instant;
+    use std::{io::ErrorKind, sync::mpsc, thread, time::Duration};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
+
+    const RECV_TIMEOUT: Duration = Duration::from_secs(30);
+    const READ_LOOP_DEADLINE: Duration = Duration::from_secs(5);
 
     // A bound listener that never accepts lets the TCP handshake complete
     // (backlog) but stalls the Bolt version exchange. The upstream per-stage
@@ -866,5 +968,93 @@ mod tests {
         assert_eq!(url.port(), 4242);
         assert_eq!(url.host(), Host::Domain("127.0.0.1"));
         assert_eq!(url.scheme(), "bolt");
+    }
+
+    async fn serve_bytes_then_close(bytes: Vec<u8>) -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(&bytes).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        port
+    }
+
+    async fn connect(port: u16) -> Connection {
+        let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        Connection::create(stream, Version::V4_4, Some(RECV_TIMEOUT))
+    }
+
+    enum ReadOutcome {
+        Completed,
+        UnexpectedEof,
+        OtherError,
+    }
+
+    fn recv_bytes_on_worker_thread(server_bytes: Vec<u8>) -> ReadOutcome {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let port = serve_bytes_then_close(server_bytes).await;
+                let mut connection = connect(port).await;
+                let outcome = match connection.recv_bytes().await {
+                    Ok(_) => ReadOutcome::Completed,
+                    Err(Error::IOError { detail }) if detail.kind() == ErrorKind::UnexpectedEof => {
+                        ReadOutcome::UnexpectedEof
+                    }
+                    Err(_) => ReadOutcome::OtherError,
+                };
+                let _ = tx.send(outcome);
+            });
+        });
+        rx.recv_timeout(READ_LOOP_DEADLINE)
+            .expect("read loop did not terminate within the deadline")
+    }
+
+    #[test]
+    fn eof_inside_chunk_body_returns_unexpected_eof() {
+        let outcome = recv_bytes_on_worker_thread(vec![0x00, 0x08, 0x01, 0x02, 0x03]);
+        assert!(matches!(outcome, ReadOutcome::UnexpectedEof));
+    }
+
+    #[test]
+    fn eof_before_chunk_header_returns_unexpected_eof() {
+        let outcome = recv_bytes_on_worker_thread(Vec::new());
+        assert!(matches!(outcome, ReadOutcome::UnexpectedEof));
+    }
+
+    #[test]
+    fn eof_inside_chunk_header_returns_unexpected_eof() {
+        let outcome = recv_bytes_on_worker_thread(vec![0x00]);
+        assert!(matches!(outcome, ReadOutcome::UnexpectedEof));
+    }
+
+    #[tokio::test]
+    async fn noop_chunks_do_not_break_message_reception() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut reset = [0; 6];
+            socket.read_exact(&mut reset).await.unwrap();
+            assert_eq!(reset, [0, 2, 0xb0, 0x0f, 0, 0]);
+            socket
+                .write_all(&[
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xB1, 0x70, 0xA0, 0x00, 0x00,
+                ])
+                .await
+                .unwrap();
+        });
+        let mut connection = connect(port).await;
+        connection
+            .reset()
+            .await
+            .expect("a SUCCESS message preceded by NOOP chunks must parse");
+        server.await.unwrap();
     }
 }

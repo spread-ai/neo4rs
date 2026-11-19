@@ -2,7 +2,7 @@
 
 use std::env;
 
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
 fn main() {
     if let Err(e) = try_main() {
@@ -20,6 +20,7 @@ fn try_main() -> Result {
         match task {
             "msrv" => update_msrv_lock()?,
             "min" => update_min_lock()?,
+            "sync" => sync_lockfiles()?,
             _ => {
                 print_help();
                 return Ok(());
@@ -64,7 +65,7 @@ fn update_msrv_lock() -> Result {
 
     pin_msrv_versions(dry_run, &sh, &cargo, &lockfile)?;
 
-    cmd!(sh, "cargo +{msrv} test --no-run --all-features").run_if(dry_run)?;
+    cmd!(sh, "cargo +{msrv} test --locked --no-run --all-features").run_if(dry_run)?;
 
     cmd!(sh, "cp {lockfile} {ci_dir}/Cargo.lock.msrv").run_if(dry_run)?;
 
@@ -86,7 +87,7 @@ fn update_min_lock() -> Result {
 
     cmd!(
         sh,
-        "cargo +nightly -Z minimal-versions test --package neo4rs --no-run --all-features"
+        "cargo +nightly -Z minimal-versions test --locked --package neo4rs --no-run --all-features"
     )
     .env("RUST_LOG", "debug")
     .run_if(dry_run)?;
@@ -99,28 +100,47 @@ fn update_min_lock() -> Result {
 fn pin_msrv_versions(dry_run: bool, sh: &Shell, cargo: &str, lockfile: &str) -> Result<()> {
     cmd!(sh, "rm {lockfile}").run_if(dry_run)?;
 
-    let indexmap_dep = latest_version(sh, "indexmap")?;
-
-    let pin_versions = &[
-        ("backon", "1.5.2"),             // 1.6.0 requires 1.85
-        ("deranged", "0.5.5"),           // 0.5.6 requires 1.85
-        ("idna_adapter", "1.2.0"),       // 1.2.1 requires 1.82, transitive from url
-        ("nalgebra", "0.32.6"),          // transitive requirement from nav_types,
-        ("security-framework", "3.6.0"), // 3.7.0 requires 1.85
-        ("serde_with", "3.16.1"),        // 3.17.0 requires 1.82, 3.18.0 does 1.88
-        (indexmap_dep, "2.11.4"),        // 2.12.0 requires 1.82, 2.14.0 does 1.85
-        ("time", "0.3.44"),              // 0.3.45 requires 1.83, and 1.88 since 0.3.46
-        ("uuid", "1.20.0"),              // 1.21.0 requires 1.85, also brings in getrandom@0.4
+    let versions = &[
+        ("idna_adapter", "1.2.0"), // 1.2.2 requires 1.86
+        ("time", "0.3.45"),        // 0.3.45 requires 1.83, and 1.88 since 0.3.46
+        ("serde_with", "3.17.0"),  // 3.17.0 requires 1.82, 3.18.0 does 1.88
+        ("uuid", "1.26.1"),        // 1.27.0 requires 1.88
     ];
-    for (krate, version) in pin_versions {
-        pin_version(dry_run, sh, cargo, krate, version)?;
-    }
+    pin_versions(dry_run, sh, cargo, versions)
+}
 
-    Ok(())
+fn pin_versions(dry_run: bool, sh: &Shell, cargo: &str, versions: &[(&str, &str)]) -> Result<()> {
+    let mut versions = versions.to_vec();
+    let mut next_versions = Vec::<(&str, &str)>::new();
+    loop {
+        let mut error = None::<DynError>;
+
+        for &(krate, version) in &versions {
+            if let Err(err) = pin_version(dry_run, sh, cargo, krate, version) {
+                if error.is_none() {
+                    error = Some(err);
+                }
+                next_versions.push((krate, version));
+            }
+        }
+
+        if next_versions.is_empty() || next_versions.len() == versions.len() {
+            return match error {
+                Some(err) => Err(err),
+                None => Ok(()),
+            };
+        }
+
+        versions = std::mem::take(&mut next_versions);
+    }
 }
 
 fn pin_version(dry_run: bool, sh: &Shell, cargo: &str, krate: &str, version: &str) -> Result<()> {
-    cmd!(sh, "{cargo} update --package {krate} --precise {version}").run_if(dry_run)?;
+    cmd!(
+        sh,
+        "{cargo} update --offline --package {krate} --precise {version}"
+    )
+    .run_if(dry_run)?;
     Ok(())
 }
 
@@ -147,6 +167,32 @@ fn latest_version(sh: &Shell, krate: &str) -> Result<&'static str> {
     let name = Box::leak(name.into_boxed_str());
 
     Ok(name)
+}
+
+fn sync_lockfiles() -> Result {
+    let Env {
+        lockfile,
+        ci_dir,
+        dry_run,
+        ..
+    } = task_env();
+
+    let sh = Shell::new()?;
+    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+
+    cmd!(sh, "mv {lockfile} {lockfile}.backup").run_if(dry_run)?;
+
+    cmd!(sh, "cp {ci_dir}/Cargo.lock.min {lockfile}").run_if(dry_run)?;
+    let _ = cmd!(sh, "{cargo} check --keep-going").run_if(dry_run);
+    cmd!(sh, "mv {lockfile} {ci_dir}/Cargo.lock.min").run_if(dry_run)?;
+
+    cmd!(sh, "cp {ci_dir}/Cargo.lock.msrv {lockfile}").run_if(dry_run)?;
+    let _ = cmd!(sh, "{cargo} check --keep-going").run_if(dry_run);
+    cmd!(sh, "mv {lockfile} {ci_dir}/Cargo.lock.msrv").run_if(dry_run)?;
+
+    cmd!(sh, "mv {lockfile}.backup {lockfile}").run_if(dry_run)?;
+
+    Ok(())
 }
 
 struct Env {

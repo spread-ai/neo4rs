@@ -7,24 +7,24 @@ use {
     std::sync::Arc,
 };
 
+use crate::RunResult;
 use crate::config::ImpersonateUser;
 use crate::pool::ManagedConnection;
 use crate::query::RetryableQuery;
 use crate::retry::Retry;
-use crate::RunResult;
-use crate::{
-    config::{Config, ConfigBuilder, Database, LiveConfig},
-    errors::Result,
-    pool::{create_pool, ConnectionPool},
-    query::Query,
-    stream::DetachedRowStream,
-    txn::Txn,
-    Operation,
-};
 #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
 use crate::{
-    session::{Session, SessionConfig},
     Error,
+    session::{Session, SessionConfig},
+};
+use crate::{
+    Operation,
+    config::{Config, ConfigBuilder, Database, LiveConfig},
+    errors::Result,
+    pool::{ConnectionPool, create_pool},
+    query::Query,
+    stream::DetachedRowStream,
+    txn::{TransactionConfig, Txn},
 };
 use backon::{ExponentialBuilder, RetryableWithContext};
 use std::time::Duration;
@@ -141,12 +141,21 @@ impl Graph {
     ///
     /// Transactions will not be automatically retried on any failure.
     pub async fn start_txn(&self) -> Result<Txn> {
+        self.start_txn_with_config(TransactionConfig::default())
+            .await
+    }
+
+    /// Starts a new transaction on the configured database with the provided options.
+    ///
+    /// Transactions will not be automatically retried on any failure.
+    pub async fn start_txn_with_config(&self, config: TransactionConfig) -> Result<Txn> {
         self.impl_start_txn_on(
             self.config.db.clone(),
             Operation::Write,
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
+            config,
         )
         .await
     }
@@ -162,12 +171,28 @@ impl Graph {
         operation: Operation,
         bookmarks: Option<Vec<String>>,
     ) -> Result<Txn> {
+        self.start_txn_as_with_config(operation, bookmarks, TransactionConfig::default())
+            .await
+    }
+
+    /// Starts a new transaction on the configured database with the desired operation,
+    /// bookmarks, and transaction options.
+    ///
+    /// Transactions will not be automatically retried on any failure.
+    #[cfg(feature = "unstable-bolt-protocol-impl-v2")]
+    pub async fn start_txn_as_with_config(
+        &self,
+        operation: Operation,
+        bookmarks: Option<Vec<String>>,
+        config: TransactionConfig,
+    ) -> Result<Txn> {
         self.impl_start_txn_on(
             self.config.db.clone(),
             operation,
             self.config.imp_user.clone(),
             bookmarks.as_deref().unwrap_or_default(),
             Some(self.config.fetch_size),
+            config,
         )
         .await
     }
@@ -178,12 +203,25 @@ impl Graph {
     ///
     /// Transactions will not be automatically retried on any failure.
     pub async fn start_txn_on(&self, db: impl Into<Database>) -> Result<Txn> {
+        self.start_txn_on_with_config(db, TransactionConfig::default())
+            .await
+    }
+
+    /// Starts a new transaction on the provided database with the provided options.
+    ///
+    /// Transactions will not be automatically retried on any failure.
+    pub async fn start_txn_on_with_config(
+        &self,
+        db: impl Into<Database>,
+        config: TransactionConfig,
+    ) -> Result<Txn> {
         self.impl_start_txn_on(
             Some(db.into()),
             Operation::Write,
             self.config.imp_user.clone(),
             &[],
             Some(self.config.fetch_size),
+            config,
         )
         .await
     }
@@ -196,6 +234,7 @@ impl Graph {
         imp_user: Option<ImpersonateUser>,
         bookmarks: &[String],
         fetch_size: Option<usize>,
+        config: TransactionConfig,
     ) -> Result<Txn> {
         let connection = self
             .pool
@@ -210,6 +249,7 @@ impl Graph {
                 operation,
                 imp_user,
                 bookmarks,
+                config,
             )
             .await
         }
@@ -222,6 +262,7 @@ impl Graph {
                 connection,
                 operation,
                 imp_user,
+                config,
             )
             .await
         }
