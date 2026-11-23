@@ -82,6 +82,12 @@ impl DetachedRowStream {
     pub(crate) fn new(stream: RowStream, connection: ManagedConnection) -> Self {
         DetachedRowStream { stream, connection }
     }
+    /// Set the number of records requested by subsequent Bolt PULL messages.
+    /// Already buffered records and any outstanding result-size limit are unaffected.
+    pub fn set_fetch_size(&mut self, rows: std::num::NonZeroU32) {
+        self.stream.fetch_size = rows.get() as usize;
+    }
+
     /// Returns the cumulative number of bytes read from the server for this query.
     ///
     /// This value counts all bytes received from the server for the query, including Bolt protocol
